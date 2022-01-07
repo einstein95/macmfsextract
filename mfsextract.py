@@ -1,130 +1,199 @@
 #!/usr/bin/env python3
 
-#Created by Don Barber, don@dgb3.net
-#Pass the raw disk image on the command line as argument 1
-#add verbose as argument 2 if you want some extra details
+# Created by Don Barber, don@dgb3.net
+# Pass the raw disk image on the command line as argument 1
+# add verbose as argument 2 if you want some extra details
 
-#MFS implementation details from https://www.macgui.com/news/article.php?t=482
+# MFS implementation details from https://www.macgui.com/news/article.php?t = 482
 
-#If the image is a diskcopy 4.2 image, extract the raw MFS image first via:
-# dd if=INPUTFILE of=OUTPUTFILE bs=84 skip=1
+# If the image is a diskcopy 4.2 image, extract the raw MFS image first via:
+#  dd if = INPUTFILE of = OUTPUTFILE bs = 84 skip = 1
 
-#Idea for improvement: extract files as macbinary format instead of
-#individual data and resource forks
+# Idea for improvement: extract files as macbinary format instead of
+# individual data and resource forks
 
-import sys
 import os
 import math
+from binascii import crc_hqx
+from struct import pack, unpack
+from sys import argv
 
-filename=sys.argv[1]
+
+def file_to_macbin(data, rsrc, crdate, mddate, type, creator, flags, name):
+    oldFlags = flags >> 8
+    newFlags = flags & 255
+    macbin = pack(
+        ">x64p4s4sB7xBxIIII2xB14x6xBB",
+        name,
+        type,
+        creator,
+        oldFlags,
+        oldFlags & 128,
+        len(data),
+        len(rsrc),
+        crdate,
+        mddate,
+        newFlags,
+        129,
+        129,
+    )
+    macbin += pack(">H2x", crc_hqx(macbin, 0))
+    if data:
+        macbin += data
+        macbin += b"\x00" * (-len(data) % 128)
+
+    if rsrc:
+        macbin += rsrc
+        macbin += b"\x00" * (-len(rsrc) % 128)
+
+    return macbin
+
+
+filename = argv[1]
 
 file_size = os.path.getsize(filename)
-fh=open(filename,"rb")
+fh = open(filename, "rb")
 
 fh.seek(1026)
 
-drCrDate = int.from_bytes(fh.read(4),'big')
-drLsBkUp = int.from_bytes(fh.read(4),'big')
-drAtrb=int.from_bytes(fh.read(2),'big')
-drNmFls=int.from_bytes(fh.read(2),'big')
-drDirSt=int.from_bytes(fh.read(2),'big')
-drBlLen=int.from_bytes(fh.read(2),'big')
-drNmAlBlks=int.from_bytes(fh.read(2),'big')
-drAlBlkSiz=int.from_bytes(fh.read(4),'big')
-drClpSiz=int.from_bytes(fh.read(4),'big')
-drAlBlSt=int.from_bytes(fh.read(2),'big')
-drNxtFNum=int.from_bytes(fh.read(4),'big')
-drFreeBks=int.from_bytes(fh.read(2),'big')
-drVNl=int.from_bytes(fh.read(1),'big')
-drVN=fh.read(drVNl)
-print("Volume Name:",drVN)
-if 'verbose' in sys.argv:
-    print("Volume Create Datestamp:",drCrDate)
-    print("Volume Modify Datestamp:",drLsBkUp)
+(
+    drCrDate,
+    drLsBkUp,
+    drAtrb,
+    drNmFls,
+    drDirSt,
+    drBlLen,
+    drNmAlBlks,
+    drAlBlkSiz,
+    drClpSiz,
+    drAlBlSt,
+    drNxtFNum,
+    drFreeBks,
+    drVNl,
+) = unpack(">IIHHHHHIIHIHB", fh.read(35))
 
-maplocation=0x440
+drVN = fh.read(drVNl).decode("mac-roman")
+print(f"Volume Name: {drVN}")
+if "verbose" in argv:
+    print(f"Volume Create Datestamp: {drCrDate}")
+    print(f"Volume Modify Datestamp: {drLsBkUp}")
+
+maplocation = 0x440
+
 
 def getmapentry(blocknum):
-    location=((blocknum-2)*12/8)
-    if location==math.ceil(location):
-        fh.seek(maplocation+int(location))
-        entry=(int.from_bytes(fh.read(2),'big') >> 4)
+    location = (blocknum - 2) * 12 / 8
+    if location == math.ceil(location):
+        fh.seek(maplocation + int(location))
+        entry = unpack(">H", fh.read(2))[0] >> 4
     else:
-        fh.seek(maplocation+math.floor(location))
-        entry=(int.from_bytes(fh.read(2),'big') & 0xFFF )
+        fh.seek(maplocation + math.floor(location))
+        entry = unpack(">H", fh.read(2))[0] & 0xFFF
     return entry
 
-def getfilecontents(block,length):
-    blocklist=[block]
+
+def getfilecontents(block, length):
+    blocklist = [block]
     while True:
-        block=getmapentry(block)
-        #print(block)
-        if block==1:
+        block = getmapentry(block)
+        # print(block)
+        if block == 1:
             break
         blocklist.append(block)
-        if block==0:
+        if block == 0:
             raise Exception("Unused Block")
-    if 'verbose' in sys.argv:
-        print("Blocklist:",blocklist)
-    contents=b''
+
+    if "verbose" in argv:
+        print("Blocklist:", blocklist)
+
+    contents = b""
     for block in blocklist:
-        if 'verbose' in sys.argv:
-            print("Seeking to:",hex(drAlBlSt*512+(block-2)*drAlBlkSiz),"for block",block)
-        fh.seek(drAlBlSt*512+(block-2)*drAlBlkSiz)
-        data=fh.read(drAlBlkSiz)
-        contents+=data
+        if "verbose" in argv:
+            print(
+                f"Seeking to: {drAlBlSt * 512 + (block - 2) * drAlBlkSiz:x} for block {block}"
+            )
+        fh.seek(drAlBlSt * 512 + (block - 2) * drAlBlkSiz)
+        data = fh.read(drAlBlkSiz)
+        contents += data
+
     return contents[:length]
 
-fh.seek(drDirSt*512)
-while True:
-    flFlgs=fh.read(1)
-    flType=int.from_bytes(fh.read(1),'big')
-    while flFlgs==b'\x00':  #loop until next record found
-        flFlgs=fh.read(1)
-        flType=int.from_bytes(fh.read(1),'big')
-        if fh.tell()>=((drDirSt+drBlLen-1)*512): #we're past the end of the file directory, exit out
-            break
-    if fh.tell()>=((drDirSt+drBlLen-1)*512): #we're past the end of the file directory, exit out
-        break
-    if flFlgs!=b'\x00':
-        flUsrWds=fh.read(16)
-        flFlNum=int.from_bytes(fh.read(4),'big')
-        flStBlk=int.from_bytes(fh.read(2),'big')
-        flLgLen=int.from_bytes(fh.read(4),'big')
-        flPyLen=int.from_bytes(fh.read(4),'big')
-        flRStBlk=int.from_bytes(fh.read(2),'big')
-        flRLgLen=int.from_bytes(fh.read(4),'big')
-        flRPyLen=int.from_bytes(fh.read(4),'big')
-        flCrDat=int.from_bytes(fh.read(4),'big')
-        flMdDat=int.from_bytes(fh.read(4),'big')
-        flNaml=int.from_bytes(fh.read(1),'big')
-        flNam=fh.read(flNaml)
-        if (fh.tell()%2==1):  #align to word boundary after reading name
-            fh.read(1)
-        if flFlNum!=0:
-            print(hex(fh.tell()),flFlNum,flNaml,flNam)
-            if 'verbose' in sys.argv:
-                print("Create Datestamp:",flCrDat)
-                print("Modify Datestamp:",flMdDat)
-            location=fh.tell()
-            oh=open(flNam+b".info","wb")
-            oh.write(flUsrWds)
-            oh.close()
 
-            if(flStBlk==0 and flRStBlk==0):
-                print("Error:",flNam,"has neither data nor resource fork")
-            if flStBlk!=0:
-                content=getfilecontents(flStBlk,flLgLen)
-                oh=open(flNam+b".data","wb")
-                oh.write(content)
-                oh.close()
-            if flRStBlk!=0:
-                content=getfilecontents(flRStBlk,flRLgLen)
-                oh=open(flNam+b".rsrc","wb")
-                oh.write(content)
-                oh.close()
+fh.seek(drDirSt * 512)
+while True:
+    flFlgs = fh.read(1)
+    flType = int.from_bytes(fh.read(1), "big")
+    while flFlgs == b"\x00":  # loop until next record found
+        flFlgs = fh.read(1)
+        flType = int.from_bytes(fh.read(1), "big")
+        if fh.tell() >= (
+            (drDirSt + drBlLen - 1) * 512
+        ):  # we're past the end of the file directory, exit out
+            break
+
+    if fh.tell() >= (
+        (drDirSt + drBlLen - 1) * 512
+    ):  # we're past the end of the file directory, exit out
+        break
+
+    if flFlgs != b"\x00":
+        # flUsrWds = fh.read(16)
+        fdType, fdCreator, fdFlags, fdLocation, fdFldr = unpack(">4s4sHIh", fh.read(16))
+        (
+            flFlNum,
+            flStBlk,
+            flLgLen,
+            flPyLen,
+            flRStBlk,
+            flRLgLen,
+            flRPyLen,
+            flCrDat,
+            flMdDat,
+            flNaml,
+        ) = unpack(">IHIIHIIIIB", fh.read(33))
+        flNam = fh.read(flNaml)
+        fh.read(fh.tell() % 2)  # align to word boundary after reading name
+        if flFlNum != 0:
+            print(hex(fh.tell()), flFlNum, flNaml, flNam.decode("mac-roman"))
+            if "verbose" in argv:
+                print(f"Create Datestamp: {flCrDat}")
+                print(f"Modify Datestamp: {flMdDat}")
+
+            location = fh.tell()
+
+            if not flStBlk and not flRStBlk:
+                print(
+                    f'Error: {flNam.decode("mac-roman")} has neither data nor resource fork'
+                )
+                continue
+
+            if flStBlk != 0:
+                datafrk = getfilecontents(flStBlk, flLgLen)
+            else:
+                datafrk = b""
+
+            if flRStBlk != 0:
+                rsrcfrk = getfilecontents(flRStBlk, flRLgLen)
+            else:
+                rsrcfrk = b""
+
+            with open(flNam.decode("mac-roman"), "wb") as oh:
+                # if not rsrcfrk:
+                #     oh.write(datafrk)
+                # else:
+                oh.write(
+                    file_to_macbin(
+                        datafrk,
+                        rsrcfrk,
+                        flCrDat,
+                        flMdDat,
+                        fdType,
+                        fdCreator,
+                        fdFlags,
+                        flNam,
+                    )
+                )
+
             fh.seek(location)
 
 fh.close()
-
-
